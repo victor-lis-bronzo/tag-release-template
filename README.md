@@ -60,15 +60,53 @@ editar os workflows.
 
 ## Como usar
 
-**Release:**
+### Como criar a tag corretamente
+
+A tag **precisa ser anotada** (`-a`), não leve. O job `resolve` do
+`release.yml` checa o tipo da tag (`git cat-file -t`) e rejeita qualquer tag
+que não seja do tipo `tag` — uma tag leve (`git tag v1.2.0`, sem `-a`) aponta
+direto pro commit e falha essa checagem.
+
 ```bash
-git tag v1.2.0
-git push --tags
+git tag -a v1.2.0 -m "Release v1.2.0"
+git push origin v1.2.0
 ```
+
+- Formato exigido: SemVer estrito `vX.Y.Z` (só números — `v1.2.0-beta` não
+  passa na regex `^v[0-9]+\.[0-9]+\.[0-9]+$`).
+- O `push` da tag já dispara o `release.yml` automaticamente: `resolve`
+  (valida formato, existência e que é anotada) → `verify` → `backup` →
+  `migration-dryrun` → `deploy` → `smoke`.
+- Se errou a tag (mensagem, versão etc.), não reaproveite/mova — delete e
+  recrie:
+  ```bash
+  git tag -d v1.2.0
+  git push origin :refs/tags/v1.2.0
+  git tag -a v1.2.0 -m "Release v1.2.0"
+  git push origin v1.2.0
+  ```
 
 **Rollback / hotfix manual:** aba Actions → `Release` → `Run workflow`,
 preenchendo `tag` com a tag alvo, `confirm: yes`, e marcando
 `skip_migrations`/`skip_verify` conforme o cenário.
+
+## Sobre o job `migration-dryrun`
+
+Esse job aplica as migrations pendentes contra uma **cópia real dos dados de
+produção** (o dump mais recente gerado pelo backup), num banco escrachado
+descartável, antes de liberar o deploy de verdade. A diferença em relação ao
+`migration-check` do `verify.yml` (que já roda em todo PR contra um MySQL
+vazio) é que aqui o teste é contra o *shape* real dos dados — pega problemas
+que só aparecem com tabela populada (ex.: `NOT NULL` sem default numa coluna
+existente, constraint violada por dado real, migration que trava em tabela
+grande) e que um banco vazio nunca revelaria.
+
+**Trade-off consciente:** isso acopla o template a MySQL + Prisma + um
+backup em disco já configurado na VPS (`BACKUP_DUMP_DIR`/`BACKUP_DUMP_PREFIX`),
+o que é bem mais específico do que o resto do pipeline. Decidimos manter o
+job mesmo assim — o ganho de segurança (não travar/corromper produção com uma
+migration mal comportada) compensa a especificidade. Quem reusar o template
+com outro stack de banco/ORM deve remover ou reescrever esse job.
 
 ## Fora do escopo das variáveis
 

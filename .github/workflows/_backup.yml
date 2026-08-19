@@ -1,0 +1,32 @@
+name: _Backup (reusable)
+
+on:
+  workflow_call:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      - name: Backup do banco de dados
+        run: |
+          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' << 'EOF'
+            /bin/bash ${{ vars.BACKUP_DB_SCRIPT_PATH }}
+          EOF
+
+      - name: Executar scripts de backup na VPS
+        env:
+          BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
+        run: |
+          ssh ${{ vars.SSH_TARGET }} \
+            /bin/bash ${{ vars.BACKUP_ENVS_SCRIPT_PATH }} "$BACKUP_PASSWORD"

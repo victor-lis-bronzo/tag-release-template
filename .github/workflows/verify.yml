@@ -1,0 +1,133 @@
+name: Verify
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [api, web]
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: ${{ matrix.project }}/pnpm-lock.yaml
+
+      - name: Instalar dependências
+        working-directory: ${{ matrix.project }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Gerar Prisma Client
+        if: matrix.project == 'api'
+        working-directory: api
+        run: pnpm exec prisma generate
+
+      - name: Rodar testes
+        if: matrix.project == 'api'
+        working-directory: api
+        env:
+          SECRET_KEY: verify-ci-dummy-secret-key
+        run: pnpm exec vitest run
+
+      - name: Build (api)
+        if: matrix.project == 'api'
+        working-directory: api
+        run: pnpm run build
+
+      - name: Typecheck (api, filtrado a src/)
+        if: matrix.project == 'api'
+        working-directory: api
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          set +e
+          output="$(pnpm exec tsc --noEmit 2>&1)"
+          echo "$output"
+          set -e
+          if echo "$output" | grep -E '^src/' > /dev/null; then
+            echo "Erros de tipo encontrados em src/"
+            exit 1
+          fi
+          echo "Nenhum erro de tipo em src/ (erros fora de src/, ex. prisma/generated, são ignorados por enquanto)."
+
+      - name: Build (web, env dummy)
+        if: matrix.project == 'web'
+        working-directory: web
+        continue-on-error: true
+        env:
+          NEXT_PUBLIC_API_URL: https://dummy.invalid
+        run: pnpm run build
+        # TODO: promover a gate duro (remover continue-on-error) após ~5 runs verdes consecutivos.
+
+      - name: Typecheck (web)
+        if: matrix.project == 'web'
+        working-directory: web
+        run: pnpm exec tsc --noEmit --incremental false
+
+  migration-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: verify_shadow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      DATABASE_URL: mysql://root:root@127.0.0.1:3306/verify_shadow
+      SHADOW_DATABASE_URL: mysql://root:root@127.0.0.1:3306/verify_shadow
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: api/pnpm-lock.yaml
+
+      - name: Instalar dependências
+        working-directory: api
+        run: pnpm install --frozen-lockfile
+
+      - name: Aplicar migrations num banco vazio
+        working-directory: api
+        run: pnpm exec prisma migrate deploy
+
+      - name: Verificar drift entre migrations e schema
+        working-directory: api
+        run: |
+          pnpm exec prisma migrate diff \
+            --from-migrations ./prisma/schema/migrations \
+            --to-schema-datamodel ./prisma/schema \
+            --shadow-database-url "$SHADOW_DATABASE_URL" \
+            --exit-code

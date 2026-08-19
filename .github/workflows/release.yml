@@ -1,0 +1,234 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag a deployar/rollback (ex.: v1.1.0)'
+        required: true
+      skip_migrations:
+        description: 'Pular migrate deploy e migration-dryrun (uso: rollback)'
+        type: boolean
+        default: false
+      skip_verify:
+        description: 'Pular build/typecheck/teste (uso: rollback de emergência)'
+        type: boolean
+        default: false
+      confirm:
+        description: 'Digite "yes" para confirmar'
+        required: true
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.confirm == 'yes' }}
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolver e validar a tag
+        id: resolve
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag '$TAG' não segue o padrão SemVer vX.Y.Z"
+            exit 1
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+            echo "Tag '$TAG' não existe no repositório"
+            exit 1
+          fi
+
+          tag_type="$(git cat-file -t "refs/tags/$TAG")"
+          if [ "$tag_type" != "tag" ]; then
+            echo "Tag '$TAG' é leve (tipo '$tag_type'); só tags anotadas são aceitas"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    if: ${{ !inputs.skip_verify }}
+    uses: ./.github/workflows/verify.yml
+    secrets: inherit
+
+  backup:
+    needs: [resolve, verify]
+    if: ${{ always() && needs.resolve.result == 'success' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') }}
+    uses: ./.github/workflows/_backup.yml
+    secrets: inherit
+
+  migration-dryrun:
+    needs: backup
+    if: ${{ !inputs.skip_migrations }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      - name: Dry-run das migrations contra cópia do banco real
+        env:
+          DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+        run: |
+          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' "$DB_ROOT_PASSWORD" << 'EOF'
+            set -euo pipefail
+            DB_ROOT_PASSWORD="$1"
+            scratch_db="${{ vars.MIGRATION_DRYRUN_DB }}"
+            dump_dir="${{ vars.BACKUP_DUMP_DIR }}"
+            latest_dump="$(ls -t "$dump_dir"/${{ vars.BACKUP_DUMP_PREFIX }}-*.sql.gz 2>/dev/null | head -n1 || true)"
+
+            if [ -z "$latest_dump" ]; then
+              echo "Nenhum dump encontrado em $dump_dir (padrão ${{ vars.BACKUP_DUMP_PREFIX }}-*.sql.gz)"
+              exit 1
+            fi
+
+            mysql -h127.0.0.1 -P3306 -uroot -p"$DB_ROOT_PASSWORD" \
+              -e "DROP DATABASE IF EXISTS $scratch_db; CREATE DATABASE $scratch_db;"
+            gunzip -c "$latest_dump" | mysql -h127.0.0.1 -P3306 -uroot -p"$DB_ROOT_PASSWORD" "$scratch_db"
+
+            cd ${{ vars.API_DEPLOY_PATH }}
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use ${{ vars.NODE_VERSION }}
+
+            export DATABASE_URL="mysql://root:${DB_ROOT_PASSWORD}@127.0.0.1:3306/$scratch_db"
+            export SHADOW_DATABASE_URL="$DATABASE_URL"
+
+            time pnpm exec prisma migrate deploy
+            pnpm exec prisma migrate diff \
+              --from-migrations ./prisma/schema/migrations \
+              --to-schema-datamodel ./prisma/schema \
+              --shadow-database-url "$SHADOW_DATABASE_URL" \
+              --exit-code
+
+            mysql -h127.0.0.1 -P3306 -uroot -p"$DB_ROOT_PASSWORD" -e "DROP DATABASE $scratch_db;"
+          EOF
+        # Dump esperado em "$BACKUP_DUMP_DIR/$BACKUP_DUMP_PREFIX-<DATA>.sql.gz",
+        # gerado pelo script de backup do banco (mysqldump + gzip, achatado,
+        # sem rotação). DB_ROOT_PASSWORD vem do secret DB_ROOT_PASSWORD.
+
+  deploy:
+    needs: [resolve, migration-dryrun]
+    if: ${{ always() && needs.resolve.result == 'success' && (needs['migration-dryrun'].result == 'success' || needs['migration-dryrun'].result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      - name: Checkout da tag e deploy da API
+        env:
+          TAG: ${{ env.TAG }}
+        run: |
+          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' "$TAG" << 'EOF'
+            TAG="$1"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use ${{ vars.NODE_VERSION }}
+
+            root="${{ vars.API_DEPLOY_PATH }}"
+            workdir="$root"
+            cd "$root"
+
+            git remote set-url origin ${{ vars.DEPLOY_GIT_REMOTE }}
+
+            prev="$(git -C "$root" describe --tags --exact-match 2>/dev/null || git -C "$root" rev-parse HEAD)"
+            echo "$prev" > "${{ vars.SCRIPTS_DIR }}/last-release-$(basename "$workdir").txt"
+
+            git -C "$root" diff --quiet HEAD -- || { echo "worktree suja"; exit 1; }
+            git -C "$root" fetch --prune --prune-tags --tags --force origin
+            git -C "$root" checkout --detach --force "refs/tags/$TAG"
+
+            pnpm install --frozen-lockfile
+            pnpm exec prisma generate
+            pnpm run build
+            pnpm exec prisma migrate deploy
+          EOF
+
+      - name: Checkout da tag e deploy do Frontend Web
+        env:
+          TAG: ${{ env.TAG }}
+        run: |
+          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' "$TAG" << 'EOF'
+            TAG="$1"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use ${{ vars.NODE_VERSION }}
+
+            root="${{ vars.WEB_DEPLOY_PATH }}"
+            workdir="$root"
+            cd "$root"
+
+            git remote set-url origin ${{ vars.DEPLOY_GIT_REMOTE }}
+
+            prev="$(git -C "$root" describe --tags --exact-match 2>/dev/null || git -C "$root" rev-parse HEAD)"
+            echo "$prev" > "${{ vars.SCRIPTS_DIR }}/last-release-$(basename "$workdir").txt"
+
+            git -C "$root" diff --quiet HEAD -- || { echo "worktree suja"; exit 1; }
+            git -C "$root" fetch --prune --prune-tags --tags --force origin
+            git -C "$root" checkout --detach --force "refs/tags/$TAG"
+
+            pnpm install --frozen-lockfile
+            pnpm run build
+          EOF
+
+      - name: Reinicialização dos serviços no PM2
+        run: |
+          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' << 'EOF'
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            pm2 restart ${{ vars.PM2_API_PROCESS }}
+            pm2 restart ${{ vars.PM2_WEB_PROCESS }}
+          EOF
+
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      - name: Smoke test
+        run: |
+          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' << 'EOF'
+            sleep 5
+            curl -fsS -o /dev/null http://localhost:${{ vars.API_HEALTHCHECK_PORT }}/
+            curl -fsS -o /dev/null http://localhost:${{ vars.WEB_HEALTHCHECK_PORT }}/
+            if pm2 jlist | grep -q '"status":"errored"'; then
+              echo "Há processos em erro no PM2"
+              pm2 jlist
+              exit 1
+            fi
+          EOF

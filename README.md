@@ -176,3 +176,27 @@ O `matrix: project: [api, web]` em `verify.yml` assume um monorepo com essas
 duas pastas na raiz. Se o projeto que reusar este template tiver outra
 estrutura, edite esse matrix (e os `working-directory` correspondentes)
 diretamente no arquivo.
+
+## Limitações conhecidas
+
+- **Exposição de senha em `argv`.** Os jobs `migration-dryrun` (`release.yml`)
+  e `backup`/`_backup.yml` passam `DB_ROOT_PASSWORD` e `BACKUP_PASSWORD` como
+  argumentos posicionais para o shell remoto via SSH. Enquanto o processo
+  remoto executa, essas senhas ficam visíveis no `argv`, legível por qualquer
+  usuário local da VPS via `ps aux`. Isso é aceitável apenas sob a premissa de
+  que a VPS tem um usuário de deploy dedicado, sem outros usuários locais não
+  confiáveis. Não foi corrigido neste template porque `bash -s` já consome o
+  stdin para ler o script, então não há correção trivial sem mudar o contrato
+  (duas mitigações possíveis: transferir a senha via `scp` para um arquivo
+  `chmod 600` lido pelo script remoto; ou restringir leitura de `/proc` na VPS
+  com `hidepid=2`).
+- **Falha no `smoke` não dispara rollback automático.** O step de deploy grava
+  a tag/commit anterior em `$SCRIPTS_DIR/last-release-<projeto>.txt`, mas
+  nenhum workflow lê esse arquivo — é só um registro manual. Se o `smoke`
+  falhar, o operador precisa consultar esse arquivo (ou o histórico de tags) e
+  disparar manualmente um `workflow_dispatch` de rollback.
+- **Secrets/variables scopados ao Environment `production` quebram três jobs.**
+  Apenas o job `deploy` declara `environment: production`. Os jobs `backup`,
+  `migration-dryrun` e `smoke` não declaram `environment:` — se os secrets ou
+  variables forem movidos do nível do repositório para dentro do Environment
+  `production`, esses três jobs perdem acesso a eles e falham.

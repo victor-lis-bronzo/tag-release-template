@@ -138,6 +138,38 @@ job mesmo assim — o ganho de segurança (não travar/corromper produção com 
 migration mal comportada) compensa a especificidade. Quem reusar o template
 com outro stack de banco/ORM deve remover ou reescrever esse job.
 
+## Política de migrations (expand/contract)
+
+Prisma não tem *down migration*. O rollback que este template oferece é
+redeploy de uma tag anterior — e isso só é seguro se o schema de banco em
+produção continuar compatível com o código dessa tag anterior. Por isso a
+disciplina de migrations expand/contract é obrigatória neste pipeline, não
+opcional.
+
+Regra prática: toda mudança de schema que remove ou torna mais estrita uma
+coluna/tabela usada pelo código atual (`DROP COLUMN`, `DROP TABLE`, `RENAME`,
+adicionar `NOT NULL` sem default) precisa ser feita em duas releases
+separadas. Na primeira release, expanda (adicione a coluna/tabela nova,
+mantendo a antiga; ou torne a coluna opcional). Só numa release posterior,
+depois que o código que dependia da estrutura antiga já não existe em
+produção, remova/contraia o que sobrou. Nunca junte, numa mesma release, a
+migration destrutiva e o código que só funciona sem a estrutura antiga —
+isso quebra o rollback por redeploy de tag.
+
+O pipeline não consegue impor essa política automaticamente — o
+`migration-check` do `verify.yml` e o `migration-dryrun` do `release.yml`
+verificam que a migration aplica sem erro e sem drift, não que ela é
+retrocompatível com a tag anterior. Isso é disciplina humana de quem escreve
+a migration.
+
+Há também uma janela concreta de inconsistência dentro do próprio job
+`deploy`: o `prisma migrate deploy` da API roda antes do checkout e build do
+`web` (`release.yml`, step "Checkout da tag e deploy da API", antes do step
+"Checkout da tag e deploy do Frontend Web"). Se o build do web falhar depois
+disso, o banco já está no schema novo enquanto o processo web em produção
+ainda está rodando o código antigo — outro motivo para nunca introduzir, na
+mesma release, uma migration que o código antigo não tolera.
+
 ## Fora do escopo das variáveis
 
 O `matrix: project: [api, web]` em `verify.yml` assume um monorepo com essas

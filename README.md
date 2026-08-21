@@ -9,6 +9,31 @@ valores abaixo. Premissas de stack (monorepo `api`/`web`, MySQL + Prisma,
 Vitest) estão hardcoded nos workflows e exigem editá-los — veja "Fora do
 escopo das variáveis".
 
+## Pré-requisitos do projeto
+
+Os workflows deste template assumem que o repositório consumidor já tem, antes da
+primeira execução:
+
+- `.nvmrc` na raiz (consumido por `node-version-file` em `verify.yml`).
+- `api/` e `web/` com `pnpm-lock.yaml` próprios (instalação roda com
+  `--frozen-lockfile` em cada diretório).
+- `api/prisma/schema/` em modo pasta (schema do Prisma dividido em arquivos) e
+  `api/prisma/schema/migrations/` com as migrations já geradas — usados por
+  `migrate deploy` e `migrate diff` em `verify.yml` e `release.yml`.
+- Script `pnpm run build` funcional em `api/` e em `web/`.
+- Testes Vitest em `api/` (`pnpm exec vitest run`).
+- Os scripts de backup já instalados na VPS, nos caminhos apontados por
+  `BACKUP_DB_SCRIPT_PATH` e `BACKUP_ENVS_SCRIPT_PATH`.
+- O dump de banco gerado pelo backup em `BACKUP_DUMP_DIR`, no padrão
+  `BACKUP_DUMP_PREFIX-*.sql.gz` — é ele que o `migration-dryrun` usa como base.
+- `nvm` instalado na VPS (os scripts remotos fazem `source "$NVM_DIR/nvm.sh"` e
+  `nvm use`), com a versão de `NODE_VERSION` disponível.
+- PM2 rodando na VPS com os processos já nomeados conforme `PM2_API_PROCESS` e
+  `PM2_WEB_PROCESS`.
+- Os diretórios de deploy (`API_DEPLOY_PATH`, `WEB_DEPLOY_PATH`) e o diretório de
+  scripts/marcadores (`SCRIPTS_DIR`) já existentes na VPS, como clones git válidos
+  com o remote correto.
+
 ## Workflows
 
 - **`release.yml`** — dispara em push de tag `v[0-9]*.[0-9]*.[0-9]*` (ou
@@ -113,9 +138,65 @@ job mesmo assim — o ganho de segurança (não travar/corromper produção com 
 migration mal comportada) compensa a especificidade. Quem reusar o template
 com outro stack de banco/ORM deve remover ou reescrever esse job.
 
+## Política de migrations (expand/contract)
+
+Prisma não tem *down migration*. O rollback que este template oferece é
+redeploy de uma tag anterior — e isso só é seguro se o schema de banco em
+produção continuar compatível com o código dessa tag anterior. Por isso a
+disciplina de migrations expand/contract é obrigatória neste pipeline, não
+opcional.
+
+Regra prática: toda mudança de schema que remove ou torna mais estrita uma
+coluna/tabela usada pelo código atual (`DROP COLUMN`, `DROP TABLE`, `RENAME`,
+adicionar `NOT NULL` sem default) precisa ser feita em duas releases
+separadas. Na primeira release, expanda (adicione a coluna/tabela nova,
+mantendo a antiga; ou torne a coluna opcional). Só numa release posterior,
+depois que o código que dependia da estrutura antiga já não existe em
+produção, remova/contraia o que sobrou. Nunca junte, numa mesma release, a
+migration destrutiva e o código que só funciona sem a estrutura antiga —
+isso quebra o rollback por redeploy de tag.
+
+O pipeline não consegue impor essa política automaticamente — o
+`migration-check` do `verify.yml` e o `migration-dryrun` do `release.yml`
+verificam que a migration aplica sem erro e sem drift, não que ela é
+retrocompatível com a tag anterior. Isso é disciplina humana de quem escreve
+a migration.
+
+Há também uma janela concreta de inconsistência dentro do próprio job
+`deploy`: o `prisma migrate deploy` da API roda antes do checkout e build do
+`web` (`release.yml`, step "Checkout da tag e deploy da API", antes do step
+"Checkout da tag e deploy do Frontend Web"). Se o build do web falhar depois
+disso, o banco já está no schema novo enquanto o processo web em produção
+ainda está rodando o código antigo — outro motivo para nunca introduzir, na
+mesma release, uma migration que o código antigo não tolera.
+
 ## Fora do escopo das variáveis
 
 O `matrix: project: [api, web]` em `verify.yml` assume um monorepo com essas
 duas pastas na raiz. Se o projeto que reusar este template tiver outra
 estrutura, edite esse matrix (e os `working-directory` correspondentes)
 diretamente no arquivo.
+
+## Limitações conhecidas
+
+- **Exposição de senha em `argv`.** Os jobs `migration-dryrun` (`release.yml`)
+  e `backup`/`_backup.yml` passam `DB_ROOT_PASSWORD` e `BACKUP_PASSWORD` como
+  argumentos posicionais para o shell remoto via SSH. Enquanto o processo
+  remoto executa, essas senhas ficam visíveis no `argv`, legível por qualquer
+  usuário local da VPS via `ps aux`. Isso é aceitável apenas sob a premissa de
+  que a VPS tem um usuário de deploy dedicado, sem outros usuários locais não
+  confiáveis. Não foi corrigido neste template porque `bash -s` já consome o
+  stdin para ler o script, então não há correção trivial sem mudar o contrato
+  (duas mitigações possíveis: transferir a senha via `scp` para um arquivo
+  `chmod 600` lido pelo script remoto; ou restringir leitura de `/proc` na VPS
+  com `hidepid=2`).
+- **Falha no `smoke` não dispara rollback automático.** O step de deploy grava
+  a tag/commit anterior em `$SCRIPTS_DIR/last-release-<projeto>.txt`, mas
+  nenhum workflow lê esse arquivo — é só um registro manual. Se o `smoke`
+  falhar, o operador precisa consultar esse arquivo (ou o histórico de tags) e
+  disparar manualmente um `workflow_dispatch` de rollback.
+- **Secrets/variables scopados ao Environment `production` quebram três jobs.**
+  Apenas o job `deploy` declara `environment: production`. Os jobs `backup`,
+  `migration-dryrun` e `smoke` não declaram `environment:` — se os secrets ou
+  variables forem movidos do nível do repositório para dentro do Environment
+  `production`, esses três jobs perdem acesso a eles e falham.

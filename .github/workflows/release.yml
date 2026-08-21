@@ -42,6 +42,10 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Restaurar objetos de tag anotada
+        # actions/checkout pode materializar a tag como ref leve no runner; refaz o fetch para garantir o objeto anotado real.
+        run: git fetch --force --tags origin
+
       - name: Resolver e validar a tag
         id: resolve
         run: |

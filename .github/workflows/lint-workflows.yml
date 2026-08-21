@@ -39,4 +39,6 @@ jobs:
           install -m 0755 actionlint /usr/local/bin/actionlint
 
       - name: Rodar actionlint
-        run: actionlint -color
+        # SC2029 é ignorado: os scripts remotos passam variáveis como argumentos
+        # posicionais de propósito (padrão documentado no README, seção "Limitações conhecidas").
+        run: actionlint -color -ignore 'SC2029'

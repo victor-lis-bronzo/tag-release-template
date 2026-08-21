@@ -9,6 +9,31 @@ valores abaixo. Premissas de stack (monorepo `api`/`web`, MySQL + Prisma,
 Vitest) estão hardcoded nos workflows e exigem editá-los — veja "Fora do
 escopo das variáveis".
 
+## Pré-requisitos do projeto
+
+Os workflows deste template assumem que o repositório consumidor já tem, antes da
+primeira execução:
+
+- `.nvmrc` na raiz (consumido por `node-version-file` em `verify.yml`).
+- `api/` e `web/` com `pnpm-lock.yaml` próprios (instalação roda com
+  `--frozen-lockfile` em cada diretório).
+- `api/prisma/schema/` em modo pasta (schema do Prisma dividido em arquivos) e
+  `api/prisma/schema/migrations/` com as migrations já geradas — usados por
+  `migrate deploy` e `migrate diff` em `verify.yml` e `release.yml`.
+- Script `pnpm run build` funcional em `api/` e em `web/`.
+- Testes Vitest em `api/` (`pnpm exec vitest run`).
+- Os scripts de backup já instalados na VPS, nos caminhos apontados por
+  `BACKUP_DB_SCRIPT_PATH` e `BACKUP_ENVS_SCRIPT_PATH`.
+- O dump de banco gerado pelo backup em `BACKUP_DUMP_DIR`, no padrão
+  `BACKUP_DUMP_PREFIX-*.sql.gz` — é ele que o `migration-dryrun` usa como base.
+- `nvm` instalado na VPS (os scripts remotos fazem `source "$NVM_DIR/nvm.sh"` e
+  `nvm use`), com a versão de `NODE_VERSION` disponível.
+- PM2 rodando na VPS com os processos já nomeados conforme `PM2_API_PROCESS` e
+  `PM2_WEB_PROCESS`.
+- Os diretórios de deploy (`API_DEPLOY_PATH`, `WEB_DEPLOY_PATH`) e o diretório de
+  scripts/marcadores (`SCRIPTS_DIR`) já existentes na VPS, como clones git válidos
+  com o remote correto.
+
 ## Workflows
 
 - **`release.yml`** — dispara em push de tag `v[0-9]*.[0-9]*.[0-9]*` (ou

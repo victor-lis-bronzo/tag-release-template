@@ -2,10 +2,12 @@
 
 Template de GitHub Actions para deploy via tags (SemVer `vX.Y.Z`), com
 verificação de CI, backup pré-deploy, dry-run de migrations e smoke test
-pós-deploy. Todo dado específico de projeto (host, caminhos, nomes de banco,
+pós-deploy. Todo dado específico de ambiente (host, caminhos, nomes de banco,
 processos PM2, portas) foi extraído para *repository variables* e *secrets* —
-para reutilizar em outro projeto, basta configurar os valores abaixo, sem
-editar os workflows.
+para reutilizar em outro projeto com a mesma stack, basta configurar os
+valores abaixo. Premissas de stack (monorepo `api`/`web`, MySQL + Prisma,
+Vitest) estão hardcoded nos workflows e exigem editá-los — veja "Fora do
+escopo das variáveis".
 
 ## Workflows
 
@@ -49,7 +51,7 @@ editar os workflows.
 | `BACKUP_ENVS_SCRIPT_PATH` | `/home/scripts/project-envs-backup.sh` | script remoto de backup de envs |
 | `BACKUP_DUMP_DIR` | `/home/backups` | dir onde os dumps `.sql.gz` são gerados |
 | `BACKUP_DUMP_PREFIX` | `myproject` | prefixo do arquivo de dump (`prefix-*.sql.gz`) |
-| `MIGRATION_DRYRUN_DB` | `migration_dryrun` | nome do banco escrachado usado no dry-run |
+| `MIGRATION_DRYRUN_DB` | `migration_dryrun` | nome do banco descartável usado no dry-run |
 | `API_DEPLOY_PATH` | `/home/app/htdocs/project/api` | diretório de deploy da API na VPS |
 | `WEB_DEPLOY_PATH` | `/home/app/htdocs/project/web` | diretório de deploy do Web na VPS |
 | `DEPLOY_GIT_REMOTE` | `git@github.com:org/project.git` | remote git usado no `git checkout` da VPS |
@@ -88,12 +90,15 @@ git push origin v1.2.0
 
 **Rollback / hotfix manual:** aba Actions → `Release` → `Run workflow`,
 preenchendo `tag` com a tag alvo, `confirm: yes`, e marcando
-`skip_migrations`/`skip_verify` conforme o cenário.
+`skip_migrations`/`skip_verify` conforme o cenário. O job `deploy` roda sob o
+Environment `production`; configure required reviewers em Settings →
+Environments → `production` para exigir aprovação humana antes do deploy de
+verdade (o `confirm: yes` sozinho é só uma barreira contra clique acidental).
 
 ## Sobre o job `migration-dryrun`
 
 Esse job aplica as migrations pendentes contra uma **cópia real dos dados de
-produção** (o dump mais recente gerado pelo backup), num banco escrachado
+produção** (o dump mais recente gerado pelo backup), num banco descartável
 descartável, antes de liberar o deploy de verdade. A diferença em relação ao
 `migration-check` do `verify.yml` (que já roda em todo PR contra um MySQL
 vazio) é que aqui o teste é contra o *shape* real dos dados — pega problemas

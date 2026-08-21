@@ -21,6 +21,9 @@ on:
         description: 'Digite "yes" para confirmar'
         required: true
 
+permissions:
+  contents: read
+
 concurrency:
   group: production-release
   cancel-in-progress: false
@@ -34,7 +37,7 @@ jobs:
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
       - name: Checkout do código
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -70,47 +73,60 @@ jobs:
 
   backup:
     needs: [resolve, verify]
-    if: ${{ always() && needs.resolve.result == 'success' && (needs.verify.result == 'success' || needs.verify.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.verify.result != 'failure' }}
     uses: ./.github/workflows/_backup.yml
     secrets: inherit
 
   migration-dryrun:
-    needs: backup
-    if: ${{ !inputs.skip_migrations }}
+    needs: [resolve, backup]
+    if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.backup.result == 'success' && !inputs.skip_migrations }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Checkout do código
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Configurar SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+        uses: ./.github/actions/setup-ssh
+        with:
+          private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
 
       - name: Dry-run das migrations contra cópia do banco real
         env:
           DB_ROOT_PASSWORD: ${{ secrets.DB_ROOT_PASSWORD }}
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          MIGRATION_DRYRUN_DB: ${{ vars.MIGRATION_DRYRUN_DB }}
+          BACKUP_DUMP_DIR: ${{ vars.BACKUP_DUMP_DIR }}
+          BACKUP_DUMP_PREFIX: ${{ vars.BACKUP_DUMP_PREFIX }}
+          API_DEPLOY_PATH: ${{ vars.API_DEPLOY_PATH }}
+          NODE_VERSION: ${{ vars.NODE_VERSION }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' "$DB_ROOT_PASSWORD" << 'EOF'
+          ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
+            "$DB_ROOT_PASSWORD" "$MIGRATION_DRYRUN_DB" "$BACKUP_DUMP_DIR" "$BACKUP_DUMP_PREFIX" "$API_DEPLOY_PATH" "$NODE_VERSION" << 'EOF'
             set -euo pipefail
             DB_ROOT_PASSWORD="$1"
-            scratch_db="${{ vars.MIGRATION_DRYRUN_DB }}"
-            dump_dir="${{ vars.BACKUP_DUMP_DIR }}"
-            latest_dump="$(ls -t "$dump_dir"/${{ vars.BACKUP_DUMP_PREFIX }}-*.sql.gz 2>/dev/null | head -n1 || true)"
+            scratch_db="$2"
+            dump_dir="$3"
+            dump_prefix="$4"
+            api_deploy_path="$5"
+            node_version="$6"
+            export MYSQL_PWD="$DB_ROOT_PASSWORD"
+            latest_dump="$(ls -t "$dump_dir"/"$dump_prefix"-*.sql.gz 2>/dev/null | head -n1 || true)"
 
             if [ -z "$latest_dump" ]; then
-              echo "Nenhum dump encontrado em $dump_dir (padrão ${{ vars.BACKUP_DUMP_PREFIX }}-*.sql.gz)"
+              echo "Nenhum dump encontrado em $dump_dir (padrão $dump_prefix-*.sql.gz)"
               exit 1
             fi
 
-            mysql -h127.0.0.1 -P3306 -uroot -p"$DB_ROOT_PASSWORD" \
+            mysql -h127.0.0.1 -P3306 -uroot \
               -e "DROP DATABASE IF EXISTS $scratch_db; CREATE DATABASE $scratch_db;"
-            gunzip -c "$latest_dump" | mysql -h127.0.0.1 -P3306 -uroot -p"$DB_ROOT_PASSWORD" "$scratch_db"
+            gunzip -c "$latest_dump" | mysql -h127.0.0.1 -P3306 -uroot "$scratch_db"
 
-            cd ${{ vars.API_DEPLOY_PATH }}
+            cd "$api_deploy_path"
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use ${{ vars.NODE_VERSION }}
+            nvm use "$node_version"
 
             export DATABASE_URL="mysql://root:${DB_ROOT_PASSWORD}@127.0.0.1:3306/$scratch_db"
             export SHADOW_DATABASE_URL="$DATABASE_URL"
@@ -122,45 +138,62 @@ jobs:
               --shadow-database-url "$SHADOW_DATABASE_URL" \
               --exit-code
 
-            mysql -h127.0.0.1 -P3306 -uroot -p"$DB_ROOT_PASSWORD" -e "DROP DATABASE $scratch_db;"
+            mysql -h127.0.0.1 -P3306 -uroot -e "DROP DATABASE $scratch_db;"
           EOF
         # Dump esperado em "$BACKUP_DUMP_DIR/$BACKUP_DUMP_PREFIX-<DATA>.sql.gz",
         # gerado pelo script de backup do banco (mysqldump + gzip, achatado,
         # sem rotação). DB_ROOT_PASSWORD vem do secret DB_ROOT_PASSWORD.
 
   deploy:
-    needs: [resolve, migration-dryrun]
-    if: ${{ always() && needs.resolve.result == 'success' && (needs['migration-dryrun'].result == 'success' || needs['migration-dryrun'].result == 'skipped') }}
+    needs: [resolve, verify, backup, migration-dryrun]
+    if: >-
+      ${{ !cancelled()
+          && needs.resolve.result == 'success'
+          && needs.verify.result != 'failure'
+          && needs.backup.result == 'success'
+          && needs['migration-dryrun'].result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: production
     env:
       TAG: ${{ needs.resolve.outputs.tag }}
     steps:
+      - name: Checkout do código
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Configurar SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+        uses: ./.github/actions/setup-ssh
+        with:
+          private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
 
       - name: Checkout da tag e deploy da API
         env:
           TAG: ${{ env.TAG }}
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          NODE_VERSION: ${{ vars.NODE_VERSION }}
+          API_DEPLOY_PATH: ${{ vars.API_DEPLOY_PATH }}
+          DEPLOY_GIT_REMOTE: ${{ vars.DEPLOY_GIT_REMOTE }}
+          SCRIPTS_DIR: ${{ vars.SCRIPTS_DIR }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' "$TAG" << 'EOF'
+          ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
+            "$TAG" "$NODE_VERSION" "$API_DEPLOY_PATH" "$DEPLOY_GIT_REMOTE" "$SCRIPTS_DIR" << 'EOF'
             TAG="$1"
+            node_version="$2"
+            root="$3"
+            git_remote="$4"
+            scripts_dir="$5"
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use ${{ vars.NODE_VERSION }}
+            nvm use "$node_version"
 
-            root="${{ vars.API_DEPLOY_PATH }}"
             workdir="$root"
             cd "$root"
 
-            git remote set-url origin ${{ vars.DEPLOY_GIT_REMOTE }}
+            git remote set-url origin "$git_remote"
 
             prev="$(git -C "$root" describe --tags --exact-match 2>/dev/null || git -C "$root" rev-parse HEAD)"
-            echo "$prev" > "${{ vars.SCRIPTS_DIR }}/last-release-$(basename "$workdir").txt"
+            echo "$prev" > "$scripts_dir/last-release-$(basename "$workdir").txt"
 
             git -C "$root" diff --quiet HEAD -- || { echo "worktree suja"; exit 1; }
             git -C "$root" fetch --prune --prune-tags --tags --force origin
@@ -175,21 +208,30 @@ jobs:
       - name: Checkout da tag e deploy do Frontend Web
         env:
           TAG: ${{ env.TAG }}
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          NODE_VERSION: ${{ vars.NODE_VERSION }}
+          WEB_DEPLOY_PATH: ${{ vars.WEB_DEPLOY_PATH }}
+          DEPLOY_GIT_REMOTE: ${{ vars.DEPLOY_GIT_REMOTE }}
+          SCRIPTS_DIR: ${{ vars.SCRIPTS_DIR }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' "$TAG" << 'EOF'
+          ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
+            "$TAG" "$NODE_VERSION" "$WEB_DEPLOY_PATH" "$DEPLOY_GIT_REMOTE" "$SCRIPTS_DIR" << 'EOF'
             TAG="$1"
+            node_version="$2"
+            root="$3"
+            git_remote="$4"
+            scripts_dir="$5"
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use ${{ vars.NODE_VERSION }}
+            nvm use "$node_version"
 
-            root="${{ vars.WEB_DEPLOY_PATH }}"
             workdir="$root"
             cd "$root"
 
-            git remote set-url origin ${{ vars.DEPLOY_GIT_REMOTE }}
+            git remote set-url origin "$git_remote"
 
             prev="$(git -C "$root" describe --tags --exact-match 2>/dev/null || git -C "$root" rev-parse HEAD)"
-            echo "$prev" > "${{ vars.SCRIPTS_DIR }}/last-release-$(basename "$workdir").txt"
+            echo "$prev" > "$scripts_dir/last-release-$(basename "$workdir").txt"
 
             git -C "$root" diff --quiet HEAD -- || { echo "worktree suja"; exit 1; }
             git -C "$root" fetch --prune --prune-tags --tags --force origin
@@ -200,12 +242,19 @@ jobs:
           EOF
 
       - name: Reinicialização dos serviços no PM2
+        env:
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          PM2_API_PROCESS: ${{ vars.PM2_API_PROCESS }}
+          PM2_WEB_PROCESS: ${{ vars.PM2_WEB_PROCESS }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' << 'EOF'
+          ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
+            "$PM2_API_PROCESS" "$PM2_WEB_PROCESS" << 'EOF'
+            api_process="$1"
+            web_process="$2"
             export NVM_DIR="$HOME/.nvm"
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            pm2 restart ${{ vars.PM2_API_PROCESS }}
-            pm2 restart ${{ vars.PM2_WEB_PROCESS }}
+            pm2 restart "$api_process"
+            pm2 restart "$web_process"
           EOF
 
   smoke:
@@ -213,19 +262,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Checkout do código
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Configurar SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+        uses: ./.github/actions/setup-ssh
+        with:
+          private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
 
       - name: Smoke test
+        env:
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          API_HEALTHCHECK_PORT: ${{ vars.API_HEALTHCHECK_PORT }}
+          WEB_HEALTHCHECK_PORT: ${{ vars.WEB_HEALTHCHECK_PORT }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' << 'EOF'
+          ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
+            "$API_HEALTHCHECK_PORT" "$WEB_HEALTHCHECK_PORT" << 'EOF'
+            api_port="$1"
+            web_port="$2"
             sleep 5
-            curl -fsS -o /dev/null http://localhost:${{ vars.API_HEALTHCHECK_PORT }}/
-            curl -fsS -o /dev/null http://localhost:${{ vars.WEB_HEALTHCHECK_PORT }}/
+            curl -fsS -o /dev/null "http://localhost:$api_port/"
+            curl -fsS -o /dev/null "http://localhost:$web_port/"
             if pm2 jlist | grep -q '"status":"errored"'; then
               echo "Há processos em erro no PM2"
               pm2 jlist

@@ -1,0 +1,23 @@
+name: Configurar SSH
+description: Configura chave privada e known_hosts para acesso SSH à VPS
+
+inputs:
+  private_key:
+    description: Chave privada SSH (secrets.SSH_PRIVATE_KEY)
+    required: true
+  known_hosts:
+    description: Entrada de known_hosts da VPS (secrets.SSH_KNOWN_HOSTS)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.private_key }}
+        SSH_KNOWN_HOSTS: ${{ inputs.known_hosts }}
+      run: |
+        mkdir -p ~/.ssh
+        echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+        echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts

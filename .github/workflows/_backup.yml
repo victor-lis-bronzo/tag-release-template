@@ -3,30 +3,38 @@ name: _Backup (reusable)
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   backup:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout do código
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Configurar SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+        uses: ./.github/actions/setup-ssh
+        with:
+          private_key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
 
       - name: Backup do banco de dados
+        env:
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          BACKUP_DB_SCRIPT_PATH: ${{ vars.BACKUP_DB_SCRIPT_PATH }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} 'bash -euo pipefail -s' << 'EOF'
-            /bin/bash ${{ vars.BACKUP_DB_SCRIPT_PATH }}
+          ssh "$SSH_TARGET" 'bash -euo pipefail -s' "$BACKUP_DB_SCRIPT_PATH" << 'EOF'
+            script_path="$1"
+            /bin/bash "$script_path"
           EOF
 
       - name: Executar scripts de backup na VPS
         env:
+          SSH_TARGET: ${{ vars.SSH_TARGET }}
+          BACKUP_ENVS_SCRIPT_PATH: ${{ vars.BACKUP_ENVS_SCRIPT_PATH }}
           BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
         run: |
-          ssh ${{ vars.SSH_TARGET }} \
-            /bin/bash ${{ vars.BACKUP_ENVS_SCRIPT_PATH }} "$BACKUP_PASSWORD"
+          ssh "$SSH_TARGET" \
+            /bin/bash "$BACKUP_ENVS_SCRIPT_PATH" "$BACKUP_PASSWORD"

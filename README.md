@@ -9,9 +9,6 @@ valores abaixo. Premissas de stack (monorepo `api`/`web`, MySQL + Prisma,
 Vitest) estão hardcoded nos workflows e exigem editá-los — veja "Fora do
 escopo das variáveis".
 
-> [!WARNING]
-> **Fixtures de CI**: Este repositório contém pastas dummy (`api/`, `web/` e `.nvmrc`) apenas para que os workflows de CI rodem verde no próprio template. Se você clicou em "Use this template", **apague essas pastas e arquivos** e substitua pelo seu projeto real.
-
 ## Pré-requisitos do projeto
 
 Os workflows deste template assumem que o repositório consumidor já tem, antes da

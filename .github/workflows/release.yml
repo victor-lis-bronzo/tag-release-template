@@ -106,6 +106,7 @@ jobs:
           API_DEPLOY_PATH: ${{ vars.API_DEPLOY_PATH }}
           NODE_VERSION: ${{ vars.NODE_VERSION }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
             "$DB_ROOT_PASSWORD" "$MIGRATION_DRYRUN_DB" "$BACKUP_DUMP_DIR" "$BACKUP_DUMP_PREFIX" "$API_DEPLOY_PATH" "$NODE_VERSION" << 'EOF'
             set -euo pipefail
@@ -180,6 +181,7 @@ jobs:
           DEPLOY_GIT_REMOTE: ${{ vars.DEPLOY_GIT_REMOTE }}
           SCRIPTS_DIR: ${{ vars.SCRIPTS_DIR }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
             "$TAG" "$NODE_VERSION" "$API_DEPLOY_PATH" "$DEPLOY_GIT_REMOTE" "$SCRIPTS_DIR" << 'EOF'
             TAG="$1"
@@ -218,6 +220,7 @@ jobs:
           DEPLOY_GIT_REMOTE: ${{ vars.DEPLOY_GIT_REMOTE }}
           SCRIPTS_DIR: ${{ vars.SCRIPTS_DIR }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
             "$TAG" "$NODE_VERSION" "$WEB_DEPLOY_PATH" "$DEPLOY_GIT_REMOTE" "$SCRIPTS_DIR" << 'EOF'
             TAG="$1"
@@ -251,6 +254,7 @@ jobs:
           PM2_API_PROCESS: ${{ vars.PM2_API_PROCESS }}
           PM2_WEB_PROCESS: ${{ vars.PM2_WEB_PROCESS }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
             "$PM2_API_PROCESS" "$PM2_WEB_PROCESS" << 'EOF'
             api_process="$1"
@@ -281,6 +285,7 @@ jobs:
           API_HEALTHCHECK_PORT: ${{ vars.API_HEALTHCHECK_PORT }}
           WEB_HEALTHCHECK_PORT: ${{ vars.WEB_HEALTHCHECK_PORT }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" 'bash -euo pipefail -s' \
             "$API_HEALTHCHECK_PORT" "$WEB_HEALTHCHECK_PORT" << 'EOF'
             api_port="$1"

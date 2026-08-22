@@ -15,6 +15,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    if: github.repository != 'victor-lis-bronzo/tag-release-template'
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -92,6 +93,7 @@ jobs:
 
   migration-check:
     runs-on: ubuntu-latest
+    if: github.repository != 'victor-lis-bronzo/tag-release-template'
     timeout-minutes: 25
     services:
       mysql:

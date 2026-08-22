@@ -25,6 +25,7 @@ jobs:
           SSH_TARGET: ${{ vars.SSH_TARGET }}
           BACKUP_DB_SCRIPT_PATH: ${{ vars.BACKUP_DB_SCRIPT_PATH }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" 'bash -euo pipefail -s' "$BACKUP_DB_SCRIPT_PATH" << 'EOF'
             script_path="$1"
             /bin/bash "$script_path"
@@ -36,5 +37,6 @@ jobs:
           BACKUP_ENVS_SCRIPT_PATH: ${{ vars.BACKUP_ENVS_SCRIPT_PATH }}
           BACKUP_PASSWORD: ${{ secrets.BACKUP_PASSWORD }}
         run: |
+          # shellcheck disable=SC2029
           ssh "$SSH_TARGET" \
             /bin/bash "$BACKUP_ENVS_SCRIPT_PATH" "$BACKUP_PASSWORD"

@@ -54,6 +54,20 @@ primeira execução:
   (limitação do GitHub Actions) — edite o valor direto no arquivo se quiser
   outro horário.
 
+## CI deste próprio repositório
+
+Os jobs `verify` e `migration-check` são pulados quando rodam neste
+repositório (`victor-lis-bronzo/tag-release-template`), porque ele não
+contém `api/` nem `web/` — só o template dos workflows. Em qualquer
+repositório criado a partir de "Use this template", a condição não bate e
+os jobs rodam normalmente.
+
+Isso significa que os workflows deste repositório **não são exercitados
+automaticamente aqui**. Bumps de actions (Dependabot) e mudanças nos YAMLs
+não têm validação de comportamento antes do merge — só o `actionlint`
+(sintaxe). Se um bump introduzir uma regressão de comportamento, ela só
+aparece no primeiro projeto real que rodar o pipeline.
+
 ## Configuração (Settings → Secrets and variables → Actions)
 
 ### Secrets

@@ -41,4 +41,4 @@ jobs:
       - name: Rodar actionlint
         # SC2029 é ignorado: os scripts remotos passam variáveis como argumentos
         # posicionais de propósito (padrão documentado no README, seção "Limitações conhecidas").
-        run: actionlint -color -ignore 'SC2029'
+        run: actionlint -color
